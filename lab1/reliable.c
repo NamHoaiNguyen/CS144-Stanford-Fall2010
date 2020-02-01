@@ -40,7 +40,7 @@
 int check_packet_corrupted(packet_t *pkt, size_t n);
 void save_info_packet_last_sent_from_client(rel_t *ReliableState, packet_t *pkt, int pktLength);
 void restranmit_packet(rel_t *ReliableState);
-int get_time_last_transmission();
+int get_time_last_transmission(rel_t *ReliableState);
 packet_t *create_data_packet(rel_t *ReliableState);
 int get_time_last_transmission();
 void handle_ack_packet(rel_t *ReliableState, struct ack_packet *pkt);
