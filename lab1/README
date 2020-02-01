@@ -1,4 +1,5 @@
 CS144 - Computer Network - Stanford Fall 2010
 README for Lab 1
 
+Mission of this assignment : Implement a reliable, stop and wait (Lab 1) transport layer on top of the user datagram protocol (UDP)
 

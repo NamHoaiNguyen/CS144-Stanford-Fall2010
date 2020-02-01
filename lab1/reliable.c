@@ -36,20 +36,25 @@
 #define EOF_PACKET_SIZE                12
 
 
-/*Declare function prototype*/
+/*functions belonging to client side*/
 int check_packet_corrupted(packet_t *pkt, size_t n);
-void convert_packet_to_host_byte_order(packet_t *pkt);
-void convert_packet_to_network_byte_order(packet_t *pkt);
-void handle_data_packet(rel_t *ReliableState, packet_t *pkt);
-void handle_ack_packet(rel_t *ReliableState, packet_t *pkt);
-packet_t *create_data_packet(rel_t *ReliableState);
-void create_and_send_ack_packet(rel_t *ReliableState);
-uint16_t calculateChecksum();
-void get_info_packet_last_sent_from_client(rel_t *ReliableState, packet_t *pkt);
-void save_info_packet_last_received_in_server(rel_t *ReliableState, packet_t *pkt);
-int make_buffer_available(rel_t *ReliableState);
+void save_info_packet_last_sent_from_client(rel_t *ReliableState, packet_t *pkt, int pktLength);
 void restranmit_packet(rel_t *ReliableState);
 int get_time_last_transmission();
+packet_t *create_data_packet(rel_t *ReliableState);
+int get_time_last_transmission();
+void handle_ack_packet(rel_t *ReliableState, struct ack_packet *pkt);
+
+
+/*Functions shared by both client and server*/
+void convert_packet_to_host_byte_order(packet_t *pkt);
+void convert_packet_to_network_byte_order(packet_t *pkt);
+
+/*Functions belonging to server side*/
+int make_buffer_available(rel_t *ReliableState);
+void handle_data_packet(rel_t *ReliableState, packet_t *pkt);
+void create_and_send_ack_packet(rel_t *ReliableState, uint32_t ackno);
+void save_info_packet_last_received_in_server(rel_t *ReliableState, packet_t *pkt);
 
 
 /*Declate struct for client side*/
@@ -73,8 +78,6 @@ typedef struct serverSide {
 
   /*Both of these field used for flow control*/
   uint32_t sizeDataPacketReceived;
-  uint32_t numberByteRemainingMustBeFlushed;
-  uint16_t output[MAX_DATA_PACKET_SIZE];
   packet_t *pkt;
 }serverSide;
 
@@ -90,6 +93,9 @@ struct reliable_state {
 
   serverSide server;
   clientSide client;
+  uint16_t output[MAX_DATA_PACKET_SIZE];
+  uint32_t numberByteRemainingMustBeFlushed;
+
 };
 rel_t *rel_list;
 
@@ -137,7 +143,7 @@ rel_create (conn_t *c, const struct sockaddr_storage *ss,
   r->server.SeqnoPrevReceived = 0;
   r->server.SeqnoNext = 1; 
   r->server.sizeDataPacketReceived = 0;
-  r->server.numberByteRemainingMustBeFlushed = 0;
+  r->numberByteRemainingMustBeFlushed = 0;
 
   return r;
 }
@@ -151,6 +157,7 @@ rel_destroy (rel_t *r)
   conn_destroy (r->c);
 
   /* Free any other allocated memory here */
+  free(r);
 }
 
 
@@ -170,7 +177,7 @@ rel_demux (const struct config_common *cc,
 }
 
 
-/*server side when receiving data packet*/
+/*receiving data packet*/
 
 void
 rel_recvpkt (rel_t *r, packet_t *pkt, size_t n)
@@ -183,17 +190,16 @@ rel_recvpkt (rel_t *r, packet_t *pkt, size_t n)
   /*Convert packet to host byte order*/
   convert_packet_to_host_byte_order(pkt);
 
-  if(n == ACK_PACKET_SIZE){
-    handle_ack_packet(r,pkt);     //if received ack knowdlege -> can be client or server
+  if(pkt->len == ACK_PACKET_SIZE){
+    handle_ack_packet(r,(struct ack_packet *) pkt);     //if receive ack knowdlege -> client 
   }
   else{
-    handle_data_packet(r,pkt);    // must be server
+    handle_data_packet(r,pkt);    // if receive data packet : server
   }
 
 }
 
-/*client Get the data to transmit to the server*/
-
+/*client Get the data from "conn_input()" to transmit to the server*/
 void
 rel_read (rel_t *s)
 {
@@ -204,55 +210,77 @@ rel_read (rel_t *s)
   {
     pkt = create_data_packet(s);
     if(pkt != NULL){
-// preprocess before tranmission()
-    if(pkt->len == EOF_PACKET_SIZE){
-      s->client.clientState = WAITING_EOF_ACK_PACKET;
-    }else{
-      s->client.clientState = WAITING_ACK_PACKET;
-    }
-    convert_packet_to_network_byte_order(pkt);
 
-  //Send data packet to server
-    conn_sendpkt(s->c, (void *)pkt, sizeof(pkt->len));
-    get_info_packet_last_sent_from_client(s, pkt);
+   /*preprocess before tranmission : converting packet to network byte order and compute checksum*/
+      int pktLength = pkt->len;    
+
+      if(pktLength == EOF_PACKET_SIZE){
+        s->client.clientState = WAITING_EOF_ACK_PACKET;
+      }else{
+        s->client.clientState = WAITING_ACK_PACKET;
+      }
+     //  prepare_for_transmission (pkt);
+
+     convert_packet_to_network_byte_order(pkt);
+
+     memset (&(pkt->cksum), 0, sizeof (pkt->cksum));
+     pkt->cksum =cksum ((void*)pkt, pktLength);
+
+     /*Send data packet to server*/
+     conn_sendpkt(s->c, pkt, (size_t)(pktLength));
+    
+    /*Save infomation of the packet*/  
+     save_info_packet_last_sent_from_client(s, pkt, pktLength);
+
+     free(pkt);
     }
   }
 
 }
 
-/*Belongs to server side*/
+/*Simple Flow Control. Just sending data packet to
+server if buffer of server flush all data received in previous time to "conn_output"*/
 
 void
 rel_output (rel_t *r)
 {
   if(r->server.serverState == WAITING_BUFFER_AVAILABLE){
+    
     if(make_buffer_available(r)){
-      create_and_send_ack_packet(r);
+      create_and_send_ack_packet(r, r->server.SeqnoPrevReceived + 1);
       r->server.serverState = WAITING_PACKET;
     }
   }
 }
 
+  /* Retransmit any packets that need to be retransmitted */
 void
 rel_timer ()
 {
-  /* Retransmit any packets that need to be retransmitted */
-  rel_t *r;
-  while(r){
-    restranmit_packet(r);
-    r = r->next;
+  rel_t *ReliableState = rel_list;
+  
+  while(ReliableState){
+    restranmit_packet(ReliableState);
+    ReliableState = ReliableState->next;
   }
 }
 
 
+uint16_t compute_checksum (packet_t *packet, int packetLength)
+{  
+  memset (&(packet->cksum), 0, sizeof (packet->cksum));
+  return cksum ((void*)packet, packetLength);
+}
 
-/*Che*/
+
+/*Check packet is corrupted or not 
+If 1 : packet is corrupted */
 int check_packet_corrupted(packet_t *pkt, size_t n)
 {
   int packet_length = (int) ntohs(pkt->len);
 
   /*If packet length is not enough, return*/
-  if(packet_length < n){
+  if(n < (size_t)packet_length){
     return 1;
   }
 
@@ -261,11 +289,11 @@ int check_packet_corrupted(packet_t *pkt, size_t n)
 
   memset(&(pkt->cksum), 0, sizeof(pkt->cksum));
 
-  uint16_t checksumCalculated = cksum((void *)pkt, packet_length);            //CARE
-  if(checksum != checksumCalculated)
-    return 1;
+  
+  memset (&(pkt->cksum), 0, sizeof (pkt->cksum));
+  uint16_t checksumCalculated = cksum((void*)pkt, packet_length);
+  return checksum!= checksumCalculated;
 
-  return 0;
 }
 
 
@@ -274,7 +302,7 @@ void convert_packet_to_host_byte_order(packet_t *pkt)
 {
   pkt->len = ntohs(pkt->len);
   pkt->ackno = ntohl(pkt->ackno);
-  pkt->cksum = ntohs(pkt->cksum);
+
   if(pkt->len != ACK_PACKET_SIZE){
     pkt->seqno = ntohl(pkt->seqno);
   }
@@ -286,7 +314,6 @@ void convert_packet_to_network_byte_order(packet_t *pkt)
 {
   pkt->len = htons(pkt->len);
   pkt->ackno = htonl(pkt->ackno);
-  pkt->cksum = htons(pkt->cksum);
   if(pkt->len != ACK_PACKET_SIZE){
     pkt->seqno = htonl(pkt->seqno);
   }
@@ -296,29 +323,21 @@ void convert_ack_packet_to_network_byte_order(struct ack_packet *pkt)
 {
   pkt->len = htons(pkt->len);
   pkt->ackno = htonl(pkt->ackno);
-  pkt->cksum = htons(pkt->cksum);
 }
-
-/*
-uint16_t calculateChecksum()
-{
-
-}
-*/
 
 
 /*Server side when receiving data_packet*/
 void handle_data_packet(rel_t *ReliableState, packet_t *pkt)
 {
   if(pkt->seqno < ReliableState->server.SeqnoPrevReceived + 1){
-    create_and_send_ack_packet(ReliableState);
+    create_and_send_ack_packet(ReliableState, pkt->seqno + 1);
   }
 
   if((ReliableState->server.serverState == WAITING_PACKET)  && (pkt->seqno == ReliableState->server.SeqnoPrevReceived + 1)){
       if(pkt->len == EOF_PACKET_SIZE){
           conn_output(ReliableState->c, NULL, 0);
-          create_and_send_ack_packet(ReliableState);
           ReliableState->server.serverState = SERVER_END_CONNECTION;
+          create_and_send_ack_packet(ReliableState, pkt->seqno + 1);
       
           if(ReliableState->client.clientState == CLIENT_END_CONNECTION){
             rel_destroy(ReliableState);
@@ -330,10 +349,14 @@ void handle_data_packet(rel_t *ReliableState, packet_t *pkt)
         save_info_packet_last_received_in_server(ReliableState, pkt);
 
         if(make_buffer_available(ReliableState)){
-          create_and_send_ack_packet(ReliableState);
+          create_and_send_ack_packet(ReliableState, pkt->seqno + 1);
           ReliableState->server.serverState = WAITING_PACKET;
         }
         else{
+          // ReliableState->server.serverState = WAITING_BUFFER_AVAILABLE;
+          // while(!make_buffer_available(ReliableState)){
+          //   make_buffer_available(ReliableState);
+          // }
           ReliableState->server.serverState = WAITING_BUFFER_AVAILABLE;
         }
       }
@@ -341,7 +364,7 @@ void handle_data_packet(rel_t *ReliableState, packet_t *pkt)
 
 }
 
-void handle_ack_packet(rel_t *ReliableState, packet_t *pkt)
+void handle_ack_packet(rel_t *ReliableState, struct ack_packet *pkt)
 {
   //Resend ack packet to client side
   if(ReliableState->client.clientState == WAITING_ACK_PACKET){
@@ -365,20 +388,24 @@ void handle_ack_packet(rel_t *ReliableState, packet_t *pkt)
   }
 }
 
+
 /*Server side want to receive ack = SeqnoPrevReceived + 1*/
-void create_and_send_ack_packet(rel_t *ReliableState)
+void create_and_send_ack_packet(rel_t *ReliableState, uint32_t ackno)
 {
   struct ack_packet *ack_pkt;
   ack_pkt = xmalloc(sizeof(*ack_pkt));
 
-  ack_pkt->len = ACK_PACKET_SIZE;
-  ack_pkt->ackno = ReliableState->server.SeqnoPrevReceived + 1;
-  memset(&(ack_pkt->cksum), 0, sizeof(ack_pkt->cksum));
-  ack_pkt->cksum = cksum((void *)ack_pkt, ack_pkt->len); 
+  ack_pkt->len = (uint16_t)ACK_PACKET_SIZE;
+  ack_pkt->ackno = ackno;              
+ 
+  int pktLength = ack_pkt->len;
 
-  //sending
-  convert_ack_packet_to_network_byte_order(ack_pkt);
-  conn_sendpkt(ReliableState->c, (packet_t *)ack_pkt, ack_pkt->len);
+  convert_ack_packet_to_network_byte_order (ack_pkt);
+  memset (&(ack_pkt->cksum), 0, sizeof (ack_pkt->cksum));
+  ack_pkt->cksum = cksum((void*)ack_pkt, pktLength);
+
+  conn_sendpkt(ReliableState->c, (packet_t *)ack_pkt, (size_t)pktLength);
+  free(ack_pkt);
 }
 
 /*This function used for server side*/
@@ -387,21 +414,21 @@ packet_t *create_data_packet(rel_t *ReliableState)
   packet_t *pkt;
   pkt = xmalloc(sizeof(*pkt));
 
-  /*Create data_packet with max_size*/
   int data_packet;
  
   /*Get input data from reliable site*/
   data_packet = conn_input(ReliableState->c, pkt->data,  MAX_DATA_PACKET_SIZE);
   if(data_packet == 0){
+    free(pkt);
     return NULL;
   }
 
   /*if packet is EOF then len = 12 according to decription in rlib.h*/
   if(data_packet == -1){
-    pkt->len = EOF_PACKET_SIZE;
+    pkt->len = (uint16_t)EOF_PACKET_SIZE;
   }
   else{
-    pkt->len = data_packet + EOF_PACKET_SIZE;
+    pkt->len = (uint16_t)(data_packet + EOF_PACKET_SIZE);
   }
 
   pkt->ackno = (uint32_t)1;       /*set the ackno field to 1 as according to description in 
@@ -409,29 +436,37 @@ packet_t *create_data_packet(rel_t *ReliableState)
   
   pkt->seqno = (uint32_t)ReliableState->client.SeqnoPrevSent + 1;    //this protocol just numbers packets
 
-  memset(&(pkt->cksum), 0, sizeof(pkt->cksum));
-  pkt->cksum = cksum((void *)pkt, (int)pkt->len);      
+
   return pkt;
 }
 
 
-/*Get info of packet received at previous time : Server side */
-void get_info_packet_last_sent_from_client(rel_t *ReliableState, packet_t *pkt)
+
+
+/*Get info of packet send at previous time : clientside */
+void save_info_packet_last_sent_from_client(rel_t *ReliableState, packet_t *pkt, int pktLength)
 {
-  ReliableState->client.SeqnoPrevSent = pkt->seqno;
+  ReliableState->client.SeqnoPrevSent += 1;
   ReliableState->client.pkt = pkt;
-  ReliableState->client.lenLastPacketSent = pkt->len;
+ // memcpy (&(ReliableState->client.pkt), (pkt), pktLength);
+
+  ReliableState->client.lenLastPacketSent = (size_t)pkt->len;
   gettimeofday(&(ReliableState->client.lastTranmissionTime), NULL);   //use for retranmission
 }
 
+
+/*Get info of packet received at previous time : server side */
 void save_info_packet_last_received_in_server(rel_t *ReliableState, packet_t *pkt)
 {
   ReliableState->server.pkt = pkt;
-  memcpy (&(ReliableState->server.output), &(pkt->data), MAX_DATA_PACKET_SIZE);
+  uint16_t payload = pkt->len - MIN_DATA_PACKET_SIZE;
 
+  memcpy (&(ReliableState->output), &(pkt->data), payload);
+ // ReliableState->server.output = pkt->data;
   ReliableState->server.SeqnoPrevReceived = pkt->seqno;
-  ReliableState->server.sizeDataPacketReceived = pkt->len - MIN_DATA_PACKET_SIZE;
-  ReliableState->server.numberByteRemainingMustBeFlushed = 0;
+  ReliableState->server.SeqnoNext += 1;
+  ReliableState->server.sizeDataPacketReceived = payload;
+  ReliableState->numberByteRemainingMustBeFlushed = 0;
 }
 
 /*Flow control 
@@ -443,34 +478,35 @@ int make_buffer_available(rel_t *ReliableState){
   }
 
   size_t byteLeft;
-  size_t gap_between_read_receive = ReliableState->server.sizeDataPacketReceived - ReliableState->server.numberByteRemainingMustBeFlushed;
+  size_t gap_between_read_receive = ReliableState->server.sizeDataPacketReceived - ReliableState->numberByteRemainingMustBeFlushed;
   if(gap_between_read_receive < buffer_space){
     byteLeft = gap_between_read_receive;
   }else{
     byteLeft = buffer_space;
   }
 
-  uint16_t *buffer = ReliableState->server.output;
-  uint16_t offset = ReliableState->server.numberByteRemainingMustBeFlushed;
+  uint16_t *buffer = ReliableState->output;
+  uint16_t offset = ReliableState->numberByteRemainingMustBeFlushed;
   int size_packet_output = conn_output(ReliableState->c , &buffer[offset], byteLeft);
   
-  ReliableState->server.numberByteRemainingMustBeFlushed += size_packet_output;
+  ReliableState->numberByteRemainingMustBeFlushed += size_packet_output;
   /*Number of data read = number of data receive in buffer*/
-  if(ReliableState->server.numberByteRemainingMustBeFlushed == ReliableState->server.sizeDataPacketReceived){
+  if(ReliableState->numberByteRemainingMustBeFlushed == ReliableState->server.sizeDataPacketReceived){
     return 1;
   }
 
   return 0;
 }
 
+/*Check timeout of packets. Retransmitting any packets which expire timeout*/
 void restranmit_packet(rel_t *ReliableState)
 {
-  if(ReliableState->client.clientState == WAITING_ACK_PACKET || ReliableState->client.clientState == WAITING_EOF_ACK_PACKET){
+  if((ReliableState->client.clientState == WAITING_ACK_PACKET) || (ReliableState->client.clientState == WAITING_EOF_ACK_PACKET)){
     
     int time_last_transmission = get_time_last_transmission(ReliableState);
     
     if(time_last_transmission > ReliableState->timeout){
-        conn_sendpkt(ReliableState->c, ReliableState->client.pkt, (ReliableState->client.lenLastPacketSent));       /////////
+        conn_sendpkt(ReliableState->c, (ReliableState->client.pkt), (ReliableState->client.lenLastPacketSent));       /////////
         gettimeofday(&(ReliableState->client.lastTranmissionTime), NULL);
     }
   }
@@ -480,6 +516,6 @@ int get_time_last_transmission(rel_t *ReliableState)
 {
   struct timeval now;
   gettimeofday(&now,NULL);
-  return (((int)now.tv_usec * 1000 + (int)now.tv_sec / 1000) - 
-    ((int)((ReliableState->client.lastTranmissionTime).tv_usec) * 1000 + (int)((ReliableState->client.lastTranmissionTime).tv_sec) / 1000));
+  return (((int)now.tv_sec * 1000 + (int)now.tv_usec / 1000) - 
+    ((int)((ReliableState->client.lastTranmissionTime).tv_sec) * 1000 + (int)((ReliableState->client.lastTranmissionTime).tv_usec) / 1000));
 }
