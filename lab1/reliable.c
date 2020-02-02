@@ -278,15 +278,15 @@ int check_packet_corrupted(packet_t *pkt, size_t n)
   }
 
   uint16_t checksum = pkt->cksum;
-
-
-  memset(&(pkt->cksum), 0, sizeof(pkt->cksum));
-
   
+  /*Calculate checksum of packet received*/
   memset (&(pkt->cksum), 0, sizeof (pkt->cksum));
   uint16_t checksumCalculated = cksum((void*)pkt, packet_length);
-  return checksum!= checksumCalculated;
+  
+  if(checksumCalculated != checksum)
+    return 1;
 
+  return 0;
 }
 
 
@@ -328,11 +328,13 @@ void handle_data_packet(rel_t *ReliableState, packet_t *pkt)
   }
 
   if((ReliableState->server.serverState == WAITING_PACKET)  && (pkt->seqno == ReliableState->server.SeqnoPrevReceived + 1)){
+      
       if(pkt->len == EOF_PACKET_SIZE){
           conn_output(ReliableState->c, NULL, 0);
           ReliableState->server.serverState = SERVER_END_CONNECTION;
           create_and_send_ack_packet(ReliableState, pkt->seqno + 1);
       
+        /*Just destroy connect when both client and servide reach to end state*/
           if(ReliableState->client.clientState == CLIENT_END_CONNECTION){
             rel_destroy(ReliableState);
           }
@@ -431,7 +433,6 @@ packet_t *create_data_packet(rel_t *ReliableState)
   
   pkt->seqno = (uint32_t)ReliableState->client.SeqnoPrevSent + 1;    //this protocol just numbers packets
 
-
   return pkt;
 }
 
@@ -505,6 +506,7 @@ void restranmit_packet(rel_t *ReliableState)
   }
 }
 
+/*Calculate the time between now and the time which transmit data packet*/
 int get_time_last_transmission(rel_t *ReliableState)
 {
   struct timeval now;
