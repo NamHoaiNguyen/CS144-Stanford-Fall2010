@@ -1,4 +1,3 @@
-
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
@@ -16,7 +15,7 @@
 
 /*Define state of client side and server side*/
 
-#define WAITING_INPUT_DATA             0          //ready state to transmit packet
+#define WAITING_INPUT_DATA             0          
 #define WAITING_ACK_PACKET             1
 #define WAITING_EOF_ACK_PACKET         2
 #define CLIENT_END_CONNECTION          3
